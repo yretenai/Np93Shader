@@ -1,0 +1,26 @@
+{
+  "file_format_version" : "1.0.0",
+  "layer" : {
+    "name": "VK_LAYER_NP93SHADER",
+    "type": "GLOBAL",
+    "library_path": "/usr/lib64/libnp93shader.so",
+    "api_version": "1.0.0",
+    "implementation_version": "1",
+    "description": "Interposes shaders",
+    "functions": {
+      "vkGetInstanceProcAddr": "Np93_GetInstanceProcAddr",
+      "vkGetDeviceProcAddr": "Np93_GetDeviceProcAddr",
+      "vkCreateInstance": "Np93_CreateInstance",
+      "vkCreateDevice": "Np93_CreateDevice",
+      "vkDestroyInstance": "Np93_DestroyInstance",
+      "vkDestroyDevice": "Np93_DestroyDevice",
+      "vkCreateShaderModule": "Np93_CreateShaderModule"
+    },
+    "enable_environment": {
+      "ENABLE_NP93_SHADER": "1"
+    },
+    "disable_environment": {
+      "DISABLE_NP93_SHADER": "1"
+    }
+  }
+}

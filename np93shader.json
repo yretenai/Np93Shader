@@ -9,12 +9,7 @@
     "description": "Interposes shaders",
     "functions": {
       "vkGetInstanceProcAddr": "Np93_GetInstanceProcAddr",
-      "vkGetDeviceProcAddr": "Np93_GetDeviceProcAddr",
-      "vkCreateInstance": "Np93_CreateInstance",
-      "vkCreateDevice": "Np93_CreateDevice",
-      "vkDestroyInstance": "Np93_DestroyInstance",
-      "vkDestroyDevice": "Np93_DestroyDevice",
-      "vkCreateShaderModule": "Np93_CreateShaderModule"
+      "vkGetDeviceProcAddr": "Np93_GetDeviceProcAddr"
     },
     "enable_environment": {
       "ENABLE_NP93_SHADER": "1"

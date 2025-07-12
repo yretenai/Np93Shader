@@ -7,6 +7,7 @@
 #include <glslang/Public/ShaderLang.h>             // for TShader, TProgram
 #include <glslang/SPIRV/GlslangToSpv.h>            // for SpvOptions, Glslan...
 
+#include <spirv_cross/spirv.hpp>                   // for ExecutionModel
 #include <spirv_cross/spirv_cross_containers.hpp>  // for SmallVector, Vecto...
 #include <spirv_cross/spirv_cross.hpp>             // for Compiler, EntryPoint
 #include <spirv_cross/spirv_glsl.hpp>              // for CompilerGLSL
@@ -19,6 +20,7 @@
 #include <array>                                   // for array
 #include <cstdint>                                 // for uint32_t, uint64_t
 #include <cstdlib>                                 // for getenv
+#include <cstring>                                 // for strcmp, strlen
 #include <filesystem>                              // for path, operator/
 #include <format>                                  // for format
 #include <fstream>                                 // for basic_ostream, cha...
@@ -27,9 +29,7 @@
 #include <mutex>                                   // for mutex, lock_guard
 #include <optional>                                // for optional, nullopt
 #include <sstream>                                 // for basic_stringstream
-#include <string.h>                                // for strcmp, strlen
 #include <string>                                  // for basic_string, string
-#include <utility>                                 // for pair
 #include <vector>                                  // for vector
 
 #include "hash.h"                                  // for CreateHash
@@ -95,9 +95,9 @@ typedef std::lock_guard<std::mutex> scoped_lock;
 std::map<VkInstance, VkuInstanceDispatchTable> instance_dispatch;
 std::map<VkDevice, VkuDeviceDispatchTable> device_dispatch;
 
-std::array<std::string, EShLangMesh + 1> shader_to_suffix{
-		".vsh",       ".control", ".eval",  ".gsh",  ".fsh",  ".csh",  ".ray",
-		".intersect", ".hit",     ".close", ".miss", ".call", ".task", ".msh",
+std::array<std::string, EShLangMesh + 1> shader_to_suffix {
+	".vert", ".tesc", ".tese", ".geom", ".frag", ".comp", ".rgen",
+	".rint", ".rahit", ".rchit", ".rmiss", ".rcall", ".task", ".mesh",
 };
 
 VkLayerInstanceCreateInfo *GetLinkInfo(VkLayerInstanceCreateInfo *link) {
@@ -160,6 +160,13 @@ DetermineSPIRVShaderType(const VkShaderModuleCreateInfo *pCreateInfo) {
 			return EShLangVertex;
 		case spv::ExecutionModelFragment:
 			return EShLangFragment;
+		case spv::ExecutionModelGLCompute:
+			return EShLangCompute;
+		case spv::ExecutionModelMeshNV:
+		case spv::ExecutionModelMeshEXT:
+			return EShLangMesh;
+		case spv::ExecutionModelGeometry:
+			return EShLangGeometry;
 		default:
 			out << "can't determine program type " << shaders[0].execution_model << std::endl;
 			return std::nullopt;
@@ -208,9 +215,17 @@ std::vector<uint32_t> CompileGLSL(std::string &glsl, EShLanguage lang) {
 	options.validate = false;
 	options.optimizeSize = true;
 	options.disassemble = false;
-	glslang::GlslangToSpv(*program.getIntermediate(lang), new_spirv, nullptr,
-												&options);
+	glslang::GlslangToSpv(*program.getIntermediate(lang), new_spirv, nullptr, &options);
 	return new_spirv;
+}
+
+bool ShaderTypeMatches(const EShLanguage type, const VkShaderStageFlagBits bits, const VkShaderStageFlagBits test) {
+	if((bits & ~test) != 0) {
+		out << "shader bits mismatch... expected a match for " << type << " got " << bits << " needs to match " << test << std::endl;
+		return false;
+	}
+
+	return true;
 }
 
 std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCreateInfo, const VkShaderStageFlagBits test_bits) {
@@ -224,17 +239,28 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 
 		if (type_opt.has_value()) {
 			const auto type = type_opt.value();
+			if (type > shader_to_suffix.size()) {
+				return {};
+			}
+
 			if (test_bits) {
-				if(type == EShLangFragment && (test_bits & ~VK_SHADER_STAGE_FRAGMENT_BIT) != 0) {
-					out << "shader bits mismatch... expected a match for " << type << " got " << test_bits << std::endl;
-					return {};
-				} else if(type == EShLangVertex && (test_bits & ~VK_SHADER_STAGE_VERTEX_BIT) != 0) {
-					out << "shader bits mismatch... expected a match for " << type << " got " << test_bits << std::endl;
+				VkShaderStageFlagBits test_type;
+				switch(type) {
+					case EShLangFragment: test_type = VK_SHADER_STAGE_FRAGMENT_BIT; break;
+					case EShLangVertex: test_type = VK_SHADER_STAGE_VERTEX_BIT; break;
+					case EShLangGeometry: test_type = VK_SHADER_STAGE_GEOMETRY_BIT; break;
+					case EShLangMesh: test_type = VK_SHADER_STAGE_MESH_BIT_EXT; break;
+					case EShLangCompute: test_type = VK_SHADER_STAGE_COMPUTE_BIT; break;
+					default: return {};
+				}
+
+				if(!ShaderTypeMatches(type, test_bits, test_type)) {
 					return {};
 				}
 			}
 
 			const auto path = global.shader_output / std::format("{:x}{}", hash, shader_to_suffix[type]);
+			const auto spv_path = global.shader_output / std::format("{:x}{}.spv", hash, shader_to_suffix[type]);
 			if (global.dump_shaders) {
 				scoped_lock lock(write_lock);
 				if(std::filesystem::exists(path)) {
@@ -247,6 +273,26 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 				stream.open(path, std::ofstream::out);
 				stream << shader << std::flush;
 				return {};
+			}
+
+			// todo: some cache.
+
+			if (std::filesystem::exists(spv_path)) {
+				scoped_lock lock(write_lock);
+				std::ifstream stream;
+				stream.open(spv_path, std::ofstream::in | std::ofstream::binary);
+				stream.seekg(0, std::ios::end);
+				auto size = stream.tellg();
+				stream.seekg(0, std::ios::beg);
+				if(size % 4 == 0) {
+					std::vector<uint32_t> new_spirv(size >> 2);
+					stream.read(reinterpret_cast<char *>(new_spirv.data()), size);
+					out << "loaded " << path.filename().string() << " as SPIR-V" << std::endl;
+					return new_spirv;
+				} else {
+					out << "SPV " << spv_path.filename().string() << " is bad, deleting" << std::endl;
+					std::filesystem::remove(spv_path);
+				}
 			}
 
 			if (std::filesystem::exists(path)) {
@@ -264,6 +310,16 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 				if (new_spirv.empty()) {
 					out << "couldn't compile shader " << path.filename().string() << std::endl;
 					return {};
+				}
+
+				{
+					scoped_lock lock(write_lock);
+					if(!std::filesystem::exists(spv_path)) {
+						out << "saving " << path.filename().string() << " as SPIR-V" << std::endl;
+						std::ofstream stream;
+						stream.open(spv_path, std::ofstream::out | std::ofstream::binary);
+						stream.write(reinterpret_cast<const char *>(new_spirv.data()), new_spirv.size() << 2);
+					}
 				}
 
 				out << "loaded " << path.filename().string() << std::endl;
@@ -335,7 +391,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelin
 			continue;
 		}
 
-		auto shader_module = CreateShaderModuleCore(reinterpret_cast<const VkShaderModuleCreateInfo *>(stages[stageIndex].pNext), static_cast<VkShaderStageFlagBits>(stages[stageIndex].stage & VK_SHADER_STAGE_ALL_GRAPHICS));
+		auto shader_module = CreateShaderModuleCore(reinterpret_cast<const VkShaderModuleCreateInfo *>(stages[stageIndex].pNext), static_cast<VkShaderStageFlagBits>(stages[stageIndex].stage & (0x00003FFF)));
 		if (shader_module.empty()) {
 			continue;
 		}

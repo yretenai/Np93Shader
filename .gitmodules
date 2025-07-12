@@ -13,3 +13,4 @@
 [submodule "PicoSHA2"]
 	path = vendor/PicoSHA2
 	url = https://github.com/okdshin/PicoSHA2/
+	ignore = dirty

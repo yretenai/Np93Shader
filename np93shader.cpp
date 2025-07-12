@@ -63,7 +63,6 @@ struct GlobalOptions {
 	std::filesystem::path shader_output;
 	bool dump_shaders;
 	bool recompile_shaders;
-	std::map<uint64_t, std::vector<uint32_t>> cache;
 
 	GlobalOptions() {
 		auto path = getenv("NP93_SHADER_PATH");
@@ -72,8 +71,8 @@ struct GlobalOptions {
 												: std::filesystem::path(path);
 		std::filesystem::create_directories(shader_output);
 		out.open(shader_output / "np.log", std::ofstream::out);
-		std::cout << "writing to" << shader_output << std::endl; 
-		out << "writing to" << shader_output << std::endl; 
+		std::cout << "writing to " << shader_output << std::endl;
+		out << "writing to " << shader_output << std::endl;
 
 		dump_shaders = CheckEnvBool("NP93_SHADER_DUMP");
 		recompile_shaders = CheckEnvBool("NP93_SHADER_RECOMPILE");
@@ -87,12 +86,12 @@ struct GlobalOptions {
 	}
 };
 
-GlobalOptions global;
+const GlobalOptions global;
 
-std::mutex global_lock;
-std::mutex shader_lock;
-std::mutex dump_lock;
+std::mutex dispatch_lock;
+std::mutex write_lock;
 typedef std::lock_guard<std::mutex> scoped_lock;
+
 std::map<VkInstance, VkuInstanceDispatchTable> instance_dispatch;
 std::map<VkDevice, VkuDeviceDispatchTable> device_dispatch;
 
@@ -181,26 +180,25 @@ std::vector<uint32_t> CompileGLSL(std::string &glsl, EShLanguage lang) {
 
 	shader.setEntryPoint("main");
 	shader.setSourceEntryPoint("main");
-	shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_3);
-	shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_5);
+	shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_4);
+	shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_6);
 
 	static auto includer = glslang::TShader::ForbidIncluder();
 	std::string preprocessed;
 	if (!shader.preprocess(resources, 450, ENoProfile, false, false, MESSAGES, &preprocessed, includer)) {
-		out << "Failed to preprocess GLSL: " << shader.getInfoLog()
-							<< std::endl;
+		out << "Failed to preprocess GLSL:\n" << shader.getInfoLog() << "\n" << shader.getInfoLog() << std::endl;
 		return new_spirv;
 	}
 
 	if (!shader.parse(resources, 450, true, MESSAGES)) {
-		out << "Failed to parse GLSL: " << shader.getInfoLog() << std::endl;
+		out << "Failed to parse GLSL:\n" << shader.getInfoLog() << "\n" << shader.getInfoLog() << std::endl;
 		return new_spirv;
 	}
 
 	glslang::TProgram program;
 	program.addShader(&shader);
 	if (!program.link(MESSAGES)) {
-		out << "Failed to link shader prorgam: " << program.getInfoLog() << std::endl;
+		out << "Failed to link shader prorgam:\n" << program.getInfoLog() << "\n" << program.getInfoDebugLog() << std::endl;
 		return new_spirv;
 	}
 
@@ -222,17 +220,6 @@ VkShaderModuleCreateInfo CreateShaderModuleCore(const VkShaderModuleCreateInfo* 
 		}
 
 		const auto hash = CreateHash(pCreateInfo->pCode, static_cast<int>(pCreateInfo->codeSize));
-		if (!global.recompile_shaders) {
-			scoped_lock lock(shader_lock);
-			auto pre = global.cache.find(hash);
-			if (pre != global.cache.end()) {
-				VkShaderModuleCreateInfo createInfo = {};
-				createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-				createInfo.pCode = pre->second.data();
-				createInfo.codeSize = pre->second.size() * 4;
-			}
-		}
-
 		auto type_opt = DetermineSPIRVShaderType(pCreateInfo);
 
 		if (type_opt.has_value()) {
@@ -249,12 +236,12 @@ VkShaderModuleCreateInfo CreateShaderModuleCore(const VkShaderModuleCreateInfo* 
 
 			const auto path = global.shader_output / std::format("{:x}{}", hash, shader_to_suffix[type]);
 			if (global.dump_shaders) {
-				scoped_lock lock(dump_lock);
+				scoped_lock lock(write_lock);
 				if(std::filesystem::exists(path)) {
 					return {};
 				}
-				
-				out << "saving " << path << std::endl;
+
+				out << "saving " << path.filename().string() << std::endl;
 				auto shader = DisassembleSPIRV(pCreateInfo);
 				std::ofstream stream;
 				stream.open(path, std::ofstream::out);
@@ -272,23 +259,18 @@ VkShaderModuleCreateInfo CreateShaderModuleCore(const VkShaderModuleCreateInfo* 
 				if (code.empty()) {
 					return {};
 				}
-				
+
 				auto new_spirv = CompileGLSL(code, type);
 				if (new_spirv.empty()) {
-					out << "couldn't compile shader " << path << std::endl;
+					out << "couldn't compile shader " << path.filename().string() << std::endl;
 					return {};
-				}
-
-				if (!global.recompile_shaders) {
-					scoped_lock lock(shader_lock);
-					global.cache.emplace(hash, new_spirv);
 				}
 
 				VkShaderModuleCreateInfo createInfo = {};
 				createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 				createInfo.pCode = new_spirv.data();
 				createInfo.codeSize = new_spirv.size() * 4;
-				out << "loaded modified shader " << path << std::endl;
+				out << "loaded modified shader " << path.filename().string() << std::endl;
 				return createInfo;
 			}
 		}
@@ -300,7 +282,7 @@ VkShaderModuleCreateInfo CreateShaderModuleCore(const VkShaderModuleCreateInfo* 
 VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const VkGraphicsPipelineCreateInfo* pCreateInfos, const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines) {
 	if(pCreateInfos == nullptr || createInfoCount != 1 || pCreateInfos->stageCount > 5 || pCreateInfos->stageCount == 0 || pCreateInfos->sType != VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO) {
 		{
-			scoped_lock l(global_lock);
+			scoped_lock lock(dispatch_lock);
 			return device_dispatch[device].CreateGraphicsPipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
 		}
 	}
@@ -332,6 +314,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelin
 	std::array<VkPipelineShaderStageCreateInfo, 5> stages;
 	std::array<VkShaderModuleCreateInfo, 5> shaders;
 
+	bool modified_at_all = false;
 	for(uint32_t stageIndex = 0; stageIndex < pipelineCreateInfo.stageCount; ++stageIndex) {
 		const auto stageInfo = &pipelineCreateInfo.pStages[stageIndex];
 
@@ -350,7 +333,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelin
 		if(stages[stageIndex].pNext == nullptr) {
 			continue;
 		}
-			
+
 		if(reinterpret_cast<const VkBaseOutStructure *>(stages[stageIndex].pNext)->sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO) {
 			continue;
 		}
@@ -358,13 +341,14 @@ VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelin
 		shaders[stageIndex] = CreateShaderModuleCore(reinterpret_cast<const VkShaderModuleCreateInfo *>(stages[stageIndex].pNext), static_cast<VkShaderStageFlagBits>(stages[stageIndex].stage & VK_SHADER_STAGE_ALL_GRAPHICS));
 		if(shaders[stageIndex].sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO) {
 			stages[stageIndex].pNext = &shaders[stageIndex];
+			modified_at_all = true;
 		}
 	}
 	pipelineCreateInfo.pStages = stages.data();
 
 	{
-		scoped_lock l(global_lock);
-		return device_dispatch[device].CreateGraphicsPipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+		scoped_lock lock(dispatch_lock);
+		return device_dispatch[device].CreateGraphicsPipelines(device, pipelineCache, createInfoCount, modified_at_all ? &pipelineCreateInfo : pCreateInfos, pAllocator, pPipelines);
 	}
 }
 
@@ -372,27 +356,26 @@ VK_LAYER_EXPORT VkResult Np93_CreateShaderModule(VkDevice device, const VkShader
 	if (pCreateInfo == nullptr || pCreateInfo->pNext != nullptr || pCreateInfo->sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO) {
 		out << "Intercepted vkCreateShaderModule is invalid!" << std::endl;
 		{
-			scoped_lock l(global_lock);
+			scoped_lock lock(dispatch_lock);
 			return device_dispatch[device].CreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
 		}
 	}
 
 	auto newCreateInfo = CreateShaderModuleCore(pCreateInfo, static_cast<VkShaderStageFlagBits>(0));
 	if(newCreateInfo.sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO) {
-		scoped_lock device_lock(global_lock);
+		scoped_lock lock(dispatch_lock);
 		return device_dispatch[device].CreateShaderModule(device, &newCreateInfo, pAllocator, pShaderModule);
 	}
 
 	out << "falling back to normal shader" << std::endl;
 	{
-		scoped_lock l(global_lock);
+		scoped_lock lock(dispatch_lock);
 		return device_dispatch[device].CreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
 	}
 }
 
 VK_LAYER_EXPORT VkResult Np93_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkInstance *pInstance) {
-	auto layerCreateInfo =
-			GetLinkInfo((VkLayerInstanceCreateInfo *)pCreateInfo->pNext);
+	auto layerCreateInfo = GetLinkInfo((VkLayerInstanceCreateInfo *)pCreateInfo->pNext);
 	if (layerCreateInfo == nullptr) {
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
@@ -404,8 +387,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateInstance(const VkInstanceCreateInfo *pCreate
 
 	layerCreateInfo->u.pLayerInfo = layerCreateInfo->u.pLayerInfo->pNext;
 
-	auto createFunc =
-			(PFN_vkCreateInstance)gpa(VK_NULL_HANDLE, "vkCreateInstance");
+	auto createFunc = (PFN_vkCreateInstance)gpa(VK_NULL_HANDLE, "vkCreateInstance");
 	if (createFunc == nullptr) {
 		return VK_ERROR_INITIALIZATION_FAILED;
 	}
@@ -418,7 +400,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateInstance(const VkInstanceCreateInfo *pCreate
 	VkuInstanceDispatchTable dispatchTable;
 	vkuInitInstanceDispatchTable(*pInstance, &dispatchTable, gpa);
 	{
-		scoped_lock lock(global_lock);
+		scoped_lock lock(dispatch_lock);
 		instance_dispatch[*pInstance] = dispatchTable;
 	}
 
@@ -457,7 +439,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL Np93_CreateDevice(VkPhysicalDevice physicalD
 	VkuDeviceDispatchTable dispatchTable;
 	vkuInitDeviceDispatchTable(*pDevice, &dispatchTable, gdpa);
 	{
-		scoped_lock lock(global_lock);
+		scoped_lock lock(dispatch_lock);
 		device_dispatch[*pDevice] = dispatchTable;
 	}
 
@@ -465,12 +447,12 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL Np93_CreateDevice(VkPhysicalDevice physicalD
 }
 
 VK_LAYER_EXPORT void Np93_DestroyInstance(VkInstance instance, const VkAllocationCallbacks *) {
-	scoped_lock lock(global_lock);
+	scoped_lock lock(dispatch_lock);
 	instance_dispatch.erase(instance);
 }
 
 VK_LAYER_EXPORT void Np93_DestroyDevice(VkDevice device, const VkAllocationCallbacks *) {
-	scoped_lock lock(global_lock);
+	scoped_lock lock(dispatch_lock);
 	device_dispatch.erase(device);
 }
 
@@ -483,7 +465,7 @@ Np93_GetInstanceProcAddr(VkInstance instance, const char *pName) {
 	GETPROCADDR(DestroyDevice);
 
 	{
-		scoped_lock l(global_lock);
+		scoped_lock lock(dispatch_lock);
 		return instance_dispatch[instance].GetInstanceProcAddr(instance, pName);
 	}
 }
@@ -495,7 +477,7 @@ Np93_GetDeviceProcAddr(VkDevice device, const char *pName) {
 	GETPROCADDR(CreateGraphicsPipelines);
 
 	{
-		scoped_lock l(global_lock);
+		scoped_lock lock(dispatch_lock);
 		return device_dispatch[device].GetDeviceProcAddr(device, pName);
 	}
 }

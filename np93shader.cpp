@@ -230,12 +230,12 @@ bool ShaderTypeMatches(const EShLanguage type, const VkShaderStageFlagBits bits,
 
 std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCreateInfo, const VkShaderStageFlagBits test_bits) {
 	try {
-		if(pCreateInfo->pNext != nullptr) {
+		if(pCreateInfo->pNext != nullptr || pCreateInfo->pCode == nullptr || pCreateInfo->codeSize < 4 || (pCreateInfo->codeSize % 4) != 0) {
 			return {};
 		}
 
 		std::vector<unsigned char> hash_bytes(picosha2::k_digest_size);
-		picosha2::hash256(pCreateInfo->pCode, pCreateInfo->pCode + static_cast<int>(pCreateInfo->codeSize), hash_bytes.begin(), hash_bytes.end());
+		picosha2::hash256(reinterpret_cast<const uint8_t*>(pCreateInfo->pCode), reinterpret_cast<const uint8_t*>(pCreateInfo->pCode) + pCreateInfo->codeSize, hash_bytes);
 		const auto hash = picosha2::bytes_to_hex_string(hash_bytes.begin(), hash_bytes.end());
 		auto type_opt = DetermineSPIRVShaderType(pCreateInfo);
 
@@ -262,7 +262,6 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 			}
 
 			const auto path = global.shader_output / std::format("{}{}", hash, shader_to_suffix[type]);
-			const auto spv_path = global.shader_output / std::format("{}{}.spv", hash, shader_to_suffix[type]);
 			if (global.dump_shaders) {
 				scoped_lock lock(write_lock);
 				if(std::filesystem::exists(path)) {
@@ -279,6 +278,7 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 
 			// todo: some cache.
 
+			const auto spv_path = global.shader_output / std::format("{}{}.spv", hash, shader_to_suffix[type]);
 			if (std::filesystem::exists(spv_path)) {
 				scoped_lock lock(write_lock);
 				std::ifstream stream;
@@ -334,7 +334,7 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 
 // dxvk has 5 stages, and 1 pipeline per call, expand as needed.
 VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const VkGraphicsPipelineCreateInfo* pCreateInfos, const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines) {
-	if(pCreateInfos == nullptr || createInfoCount != 1 || pCreateInfos->stageCount > 5 || pCreateInfos->stageCount == 0 || pCreateInfos->sType != VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO) {
+	if (pCreateInfos == nullptr || createInfoCount != 1 || pCreateInfos->stageCount > 5 || pCreateInfos->stageCount == 0 || pCreateInfos->sType != VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO) {
 		{
 			scoped_lock lock(dispatch_lock);
 			return device_dispatch[device].CreateGraphicsPipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
@@ -401,7 +401,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelin
 		shader_codes[stageIndex] = shader_module;
 		shaders[stageIndex].sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 		shaders[stageIndex].pCode = shader_codes[stageIndex].data();
-		shaders[stageIndex].codeSize = shader_codes[stageIndex].size() * 4;
+		shaders[stageIndex].codeSize = shader_codes[stageIndex].size() << 2;
 		shaders[stageIndex].flags = 0;
 		shaders[stageIndex].pNext = nullptr;
 		stages[stageIndex].pNext = &shaders[stageIndex];
@@ -429,7 +429,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateShaderModule(VkDevice device, const VkShader
 		VkShaderModuleCreateInfo newCreateInfo;
 		newCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 		newCreateInfo.pCode = shader_code.data();
-		newCreateInfo.codeSize = shader_code.size() * 4;
+		newCreateInfo.codeSize = shader_code.size() << 2;
 		newCreateInfo.flags = 0;
 		newCreateInfo.pNext = nullptr;
 

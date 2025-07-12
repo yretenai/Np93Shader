@@ -213,7 +213,7 @@ std::vector<uint32_t> CompileGLSL(std::string &glsl, EShLanguage lang) {
 	return new_spirv;
 }
 
-VkShaderModuleCreateInfo CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCreateInfo, const VkShaderStageFlagBits test_bits) {
+std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCreateInfo, const VkShaderStageFlagBits test_bits) {
 	try {
 		if(pCreateInfo->pNext != nullptr) {
 			return {};
@@ -266,12 +266,8 @@ VkShaderModuleCreateInfo CreateShaderModuleCore(const VkShaderModuleCreateInfo* 
 					return {};
 				}
 
-				VkShaderModuleCreateInfo createInfo = {};
-				createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-				createInfo.pCode = new_spirv.data();
-				createInfo.codeSize = new_spirv.size() * 4;
-				out << "loaded modified shader " << path.filename().string() << std::endl;
-				return createInfo;
+				out << "loaded " << path.filename().string() << std::endl;
+				return new_spirv;
 			}
 		}
 	} catch(...) { }
@@ -313,6 +309,7 @@ VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelin
 
 	std::array<VkPipelineShaderStageCreateInfo, 5> stages;
 	std::array<VkShaderModuleCreateInfo, 5> shaders;
+	std::array<std::vector<uint32_t>, 5> shader_codes;
 
 	bool modified_at_all = false;
 	for(uint32_t stageIndex = 0; stageIndex < pipelineCreateInfo.stageCount; ++stageIndex) {
@@ -338,11 +335,19 @@ VK_LAYER_EXPORT VkResult Np93_CreateGraphicsPipelines(VkDevice device, VkPipelin
 			continue;
 		}
 
-		shaders[stageIndex] = CreateShaderModuleCore(reinterpret_cast<const VkShaderModuleCreateInfo *>(stages[stageIndex].pNext), static_cast<VkShaderStageFlagBits>(stages[stageIndex].stage & VK_SHADER_STAGE_ALL_GRAPHICS));
-		if(shaders[stageIndex].sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO) {
-			stages[stageIndex].pNext = &shaders[stageIndex];
-			modified_at_all = true;
+		auto shader_module = CreateShaderModuleCore(reinterpret_cast<const VkShaderModuleCreateInfo *>(stages[stageIndex].pNext), static_cast<VkShaderStageFlagBits>(stages[stageIndex].stage & VK_SHADER_STAGE_ALL_GRAPHICS));
+		if (shader_module.empty()) {
+			continue;
 		}
+
+		shader_codes[stageIndex] = shader_module;
+		shaders[stageIndex].sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		shaders[stageIndex].pCode = shader_codes[stageIndex].data();
+		shaders[stageIndex].codeSize = shader_codes[stageIndex].size() * 4;
+		shaders[stageIndex].flags = 0;
+		shaders[stageIndex].pNext = nullptr;
+		stages[stageIndex].pNext = &shaders[stageIndex];
+		modified_at_all = true;
 	}
 	pipelineCreateInfo.pStages = stages.data();
 
@@ -361,13 +366,21 @@ VK_LAYER_EXPORT VkResult Np93_CreateShaderModule(VkDevice device, const VkShader
 		}
 	}
 
-	auto newCreateInfo = CreateShaderModuleCore(pCreateInfo, static_cast<VkShaderStageFlagBits>(0));
-	if(newCreateInfo.sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO) {
-		scoped_lock lock(dispatch_lock);
-		return device_dispatch[device].CreateShaderModule(device, &newCreateInfo, pAllocator, pShaderModule);
+	auto shader_code = CreateShaderModuleCore(pCreateInfo, static_cast<VkShaderStageFlagBits>(0));
+	if(!shader_code.empty()) {
+		VkShaderModuleCreateInfo newCreateInfo;
+		newCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		newCreateInfo.pCode = shader_code.data();
+		newCreateInfo.codeSize = shader_code.size() * 4;
+		newCreateInfo.flags = 0;
+		newCreateInfo.pNext = nullptr;
+
+		{
+			scoped_lock lock(dispatch_lock);
+			return device_dispatch[device].CreateShaderModule(device, &newCreateInfo, pAllocator, pShaderModule);
+		}
 	}
 
-	out << "falling back to normal shader" << std::endl;
 	{
 		scoped_lock lock(dispatch_lock);
 		return device_dispatch[device].CreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);

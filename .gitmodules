@@ -10,3 +10,6 @@
 	path = vendor/glslang
 	url = https://github.com/KhronosGroup/glslang
 	ignore = dirty
+[submodule "PicoSHA2"]
+	path = vendor/PicoSHA2
+	url = https://github.com/okdshin/PicoSHA2/

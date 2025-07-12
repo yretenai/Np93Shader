@@ -17,6 +17,8 @@
 #include <vulkan/vk_platform.h>                    // for VKAPI_CALL
 #include <vulkan/vulkan_core.h>                    // for VkResult, PFN_vkVo...
 
+#include <picosha2.h>                              // for bytes_to_hex_string
+
 #include <array>                                   // for array
 #include <cstdint>                                 // for uint32_t, uint64_t
 #include <cstdlib>                                 // for getenv
@@ -31,8 +33,6 @@
 #include <sstream>                                 // for basic_stringstream
 #include <string>                                  // for basic_string, string
 #include <vector>                                  // for vector
-
-#include "hash.h"                                  // for CreateHash
 
 #if defined(_WIN32)
 #define VK_LAYER_EXPORT extern "C" dllexport()
@@ -234,7 +234,9 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 			return {};
 		}
 
-		const auto hash = CreateHash(pCreateInfo->pCode, static_cast<int>(pCreateInfo->codeSize));
+		std::vector<unsigned char> hash_bytes(picosha2::k_digest_size);
+		picosha2::hash256(pCreateInfo->pCode, pCreateInfo->pCode + static_cast<int>(pCreateInfo->codeSize), hash_bytes.begin(), hash_bytes.end());
+		const auto hash = picosha2::bytes_to_hex_string(hash_bytes.begin(), hash_bytes.end());
 		auto type_opt = DetermineSPIRVShaderType(pCreateInfo);
 
 		if (type_opt.has_value()) {
@@ -259,8 +261,8 @@ std::vector<uint32_t> CreateShaderModuleCore(const VkShaderModuleCreateInfo* pCr
 				}
 			}
 
-			const auto path = global.shader_output / std::format("{:x}{}", hash, shader_to_suffix[type]);
-			const auto spv_path = global.shader_output / std::format("{:x}{}.spv", hash, shader_to_suffix[type]);
+			const auto path = global.shader_output / std::format("{}{}", hash, shader_to_suffix[type]);
+			const auto spv_path = global.shader_output / std::format("{}{}.spv", hash, shader_to_suffix[type]);
 			if (global.dump_shaders) {
 				scoped_lock lock(write_lock);
 				if(std::filesystem::exists(path)) {

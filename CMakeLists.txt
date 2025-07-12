@@ -32,6 +32,7 @@ target_include_directories(np93shader PRIVATE
 	vendor/glslang/SPIRV
 	vendor/glslang/External
 	vendor/SPIRV-Cross/include
+	vendor/PicoSHA2
 )
 
 target_link_libraries(np93shader PRIVATE

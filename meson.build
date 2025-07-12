@@ -26,7 +26,8 @@ shared_library(
     'vendor/SPIRV-Cross/spirv_parser.cpp'
   ],
   include_directories : [
-    'vendor/SPIRV-Cross/include'
+    'vendor/SPIRV-Cross/include',
+    'vendor/PicoSHA2'
   ],
   install : true,
   dependencies : dependencies,
